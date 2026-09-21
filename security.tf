@@ -1,6 +1,5 @@
 ############################################################
 # SÉCURITÉ : Security Groups en cascade + WAF
-# (ex 02-security.yml)
 ############################################################
 
 resource "aws_security_group" "web_alb" {
