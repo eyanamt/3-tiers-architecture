@@ -1,5 +1,5 @@
 ############################################################
-# BASE DE DONNÉES (ex 05-database.yaml)
+# BASE DE DONNÉES
 ############################################################
 
 resource "aws_db_subnet_group" "main" {
