@@ -15,7 +15,7 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "main" {
   identifier     = "${var.environment_name}-db"
   engine         = "mysql"
-  engine_version = "8.0"
+  engine_version = "8.0.46-rds.20260908" # version exacte en place dans AWS (évite toute modification)
 
   instance_class    = var.db_instance_class
   allocated_storage = var.db_allocated_storage
