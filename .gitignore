@@ -1,0 +1,28 @@
+# Répertoire local de Terraform (providers, modules)
+.terraform/
+
+# Fichiers d'état : contiennent des secrets (ex. mot de passe RDS)
+*.tfstate
+*.tfstate.*
+
+# Plans enregistrés (peuvent contenir des valeurs sensibles)
+tfplan
+*.tfplan
+
+# Fichiers de variables locales (souvent des secrets)
+*.tfvars
+*.tfvars.json
+
+# Logs de crash
+crash.log
+crash.*.log
+
+# Fichiers d'override locaux
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI config
+.terraformrc
+terraform.rc
