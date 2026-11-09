@@ -1,152 +1,275 @@
-# 3-tiers-architecture
+# Déploiement d'une architecture AWS 3-tiers avec Terraform
 
-Infrastructure AWS en architecture 3-tiers (web, applicatif, données), entièrement décrite et déployée en Infrastructure as Code avec Terraform.
+*James Kyle · 12 octobre 2026*
 
-L'objectif est de fournir une infrastructure **hautement disponible**, **sécurisée** et **reproductible**, répartie sur deux zones de disponibilité (AZ), avec une séparation stricte des niveaux réseau, une protection applicative par pare-feu web (WAF) et une base de données relationnelle résiliente.
+Infrastructure AWS à trois niveaux (web, applicatif, données) répartie sur deux zones de disponibilité et entièrement décrite avec Terraform.
+
+## Sommaire
+
+- [Contexte et objectifs](#contexte-et-objectifs)
+- [Architecture](#architecture)
+- [Services AWS utilisés](#services-aws-utilisés)
+- [Sécurité](#sécurité)
+- [Fiabilité et performance](#fiabilité-et-performance)
+- [Mise en œuvre](#mise-en-œuvre)
+- [Coûts et optimisation](#coûts-et-optimisation)
+- [Résultats](#résultats)
+- [Enseignements et évolutions](#enseignements-et-évolutions)
+
+---
+
+## Contexte et objectifs
+
+Ce projet met en place une infrastructure AWS en architecture 3-tiers (web, applicatif, données), décrite et déployée entièrement avec Terraform, afin qu'elle soit hautement disponible, sécurisée et reproductible.
+
+Objectifs, vérifiables dans le code :
+
+- répartir chaque niveau sur deux zones de disponibilité ;
+- séparer strictement les flux réseau entre les niveaux ;
+- protéger l'entrée publique par un pare-feu applicatif (WAF) ;
+- disposer d'une base de données relationnelle résiliente, avec sauvegardes automatiques sur 7 jours ;
+- externaliser chaque paramètre variable (tailles d'instances, capacités, plages CIDR, rétention des journaux) pour adapter l'infrastructure à d'autres environnements (dev, staging, prod).
 
 ---
 
 ## Architecture
 
-![Architecture 3-tiers AWS avec WAF](Architecture_projet_waf.jpg)
+Le trafic traverse trois niveaux dupliqués sur deux zones de disponibilité, et seul l'ALB public est exposé à Internet.
 
-L'infrastructure est déployée dans la région `us-east-1`, sur deux zones de disponibilité (`us-east-1a` et `us-east-1b`) :
+![Architecture 3-tiers AWS avec WAF : 2 zones de disponibilité, 6 sous-réseaux](Architecture_projet_waf.jpg)
 
-| Couche          | Sous-réseaux (AZ a / AZ b)       | Composants |
-|-----------------|----------------------------------|------------|
-| **Web**         | Publics `10.0.1.0/24` / `10.0.2.0/24`    | WAF + ALB public, ASG web (EC2 Apache), une NAT Gateway par AZ |
-| **Application** | Privés `10.0.11.0/24` / `10.0.12.0/24`   | ALB interne, ASG applicatif (EC2) |
-| **Données**     | Privés `10.0.21.0/24` / `10.0.22.0/24`   | Amazon RDS MySQL Multi-AZ (primaire + standby répliqué) |
+Le chemin d'une requête : Internet Gateway, ALB public (protégé par le WAF), instances web, ALB interne, instances applicatives, puis base de données. La région par défaut est `us-east-1`.
 
-### Flux autorisés (Security Groups en cascade)
+### Plan d'adressage
 
-| Source           | Destination      | Port      |
-|------------------|------------------|-----------|
-| Internet         | ALB public       | 80, 443   |
-| ALB public       | Instances web    | 80        |
-| Instances web    | ALB interne      | 8080      |
-| ALB interne      | Instances app    | 8080      |
-| Instances app    | RDS MySQL        | 3306      |
+| Sous-réseau | Niveau             | Zone | Plage CIDR     |
+|-------------|--------------------|:----:|----------------|
+| `public_1`  | Web (public)       | 1    | `10.0.1.0/24`  |
+| `public_2`  | Web (public)       | 2    | `10.0.2.0/24`  |
+| `app_1`     | Applicatif (privé) | 1    | `10.0.11.0/24` |
+| `app_2`     | Applicatif (privé) | 2    | `10.0.12.0/24` |
+| `data_1`    | Données (privé)    | 1    | `10.0.21.0/24` |
+| `data_2`    | Données (privé)    | 2    | `10.0.22.0/24` |
 
-Chaque niveau n'accepte du trafic **que** depuis le Security Group du niveau précédent.
+Le VPC utilise la plage `10.0.0.0/16` ; toutes ces plages sont des variables Terraform.
 
----
+### Routage
 
-## Organisation du code
-
-| Fichier         | Contenu |
-|-----------------|---------|
-| `providers.tf`  | Version Terraform/provider AWS, tags par défaut, data sources (AZ, région, AMI via SSM) |
-| `variables.tf`  | Toutes les variables paramétrables (CIDR, tailles d'instances, capacités, WAF, BDD) |
-| `network.tf`    | VPC, Internet Gateway, 6 sous-réseaux, 2 NAT Gateways (une par AZ), tables de routage |
-| `security.tf`   | Security Groups, WAFv2 Web ACL, journalisation WAF (CloudWatch Logs), alarme CloudWatch |
-| `web-tier.tf`   | ALB public, target group, launch template, Auto Scaling Group web, association WAF |
-| `app-tier.tf`   | ALB interne, target group (`/health`), launch template, Auto Scaling Group applicatif |
-| `database.tf`   | Subnet group et instance RDS MySQL (Multi-AZ, chiffrée, sauvegardes 7 jours) |
-| `outputs.tf`    | IDs réseau, ARN du WAF, DNS des ALB, endpoint de la BDD |
+- Une table de routage publique, partagée par les deux zones, envoie le trafic par défaut vers l'Internet Gateway.
+- Deux tables privées, une par zone, envoient le trafic par défaut vers la NAT Gateway de leur propre zone : la perte d'une zone n'affecte pas l'autre.
+- Les sous-réseaux applicatifs et de données d'une zone partagent la même table privée : leurs instances peuvent donc sortir vers Internet par la NAT, sans qu'Internet puisse initier une connexion vers elles.
 
 ---
 
-## Prérequis
+## Services AWS utilisés
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) **>= 1.5.0**
-- Provider AWS `~> 5.0` (installé automatiquement par `terraform init`)
-- Un compte AWS et des identifiants configurés (`aws configure`, variables d'environnement ou profil)
-- Droits IAM suffisants pour créer : VPC, EC2/ASG, ELB, WAFv2, CloudWatch, RDS
+L'infrastructure repose sur dix services ou composants AWS, tous créés par Terraform ; les valeurs ci-dessous sont celles par défaut du fichier de variables.
+
+| Service | Rôle dans le projet | Réglage clé |
+|---------|---------------------|-------------|
+| VPC, Internet Gateway, NAT Gateway | Réseau isolé et sorties vers Internet | VPC `10.0.0.0/16`, six sous-réseaux, une NAT Gateway par zone |
+| Application Load Balancer public | Point d'entrée unique depuis Internet | Écoute HTTP sur le port 80, sous-réseaux publics, contrôle de santé sur `/` |
+| Application Load Balancer interne | Répartition du trafic vers le niveau applicatif | Port 8080, sous-réseaux applicatifs, contrôle de santé sur `/health` |
+| AWS WAFv2 | Filtrage des attaques web sur l'ALB public | Quatre groupes de règles gérées AWS et une limitation de débit par IP |
+| EC2 et Auto Scaling (web) | Niveau web | `t3.micro`, Amazon Linux 2023 avec Apache, 2 à 4 instances (2 souhaitées), sous-réseaux publics |
+| EC2 et Auto Scaling (applicatif) | Niveau applicatif | `t3.micro`, 2 à 4 instances (2 souhaitées), sous-réseaux applicatifs |
+| RDS MySQL 8.0 | Base de données relationnelle | `db.t3.micro`, 20 Go, Multi-AZ, stockage chiffré, sauvegardes sur 7 jours, non publique |
+| Groupes de sécurité | Filtrage en cascade entre niveaux | Cinq groupes, un par composant |
+| CloudWatch | Journaux du WAF et alarme | Rétention de 90 jours, alarme sur les requêtes bloquées |
+| Systems Manager (paramètre SSM) | Image système toujours à jour | Dernière AMI Amazon Linux 2023 lue au déploiement |
 
 ---
 
-## Déploiement
+## Sécurité
 
-1. **Initialiser le projet**
+La sécurité repose sur une cascade de groupes de sécurité : chaque niveau n'accepte du trafic que depuis celui qui le précède, et seul l'ALB public reçoit du trafic d'Internet.
 
-   ```bash
-   terraform init
-   ```
+### Flux autorisés
 
-2. **Fournir le mot de passe de la base de données** (obligatoire, 8 caractères minimum). Ne le commitez jamais ; utilisez par exemple une variable d'environnement :
+| Source                 | Destination            | Port         |
+|------------------------|------------------------|--------------|
+| Internet               | ALB public             | 80 et 443    |
+| ALB public             | Instances web          | 80           |
+| Instances web          | ALB interne            | 8080         |
+| ALB interne            | Instances applicatives | 8080         |
+| Instances applicatives | Base de données        | 3306 (MySQL) |
 
-   ```bash
-   export TF_VAR_db_password='un-mot-de-passe-solide'
-   ```
+Au-delà du premier flux, les règles désignent le groupe de sécurité du niveau précédent plutôt qu'une plage d'adresses : elles restent valables même si les adresses changent.
 
-   ou un fichier `terraform.tfvars` (ignoré par Git) :
+### Pare-feu applicatif (WAF)
 
-   ```hcl
-   db_password      = "un-mot-de-passe-solide"
-   environment_name = "dev"
-   aws_region       = "eu-west-3"
-   ```
+Une Web ACL WAFv2 est associée à l'ALB public. Elle autorise le trafic par défaut et applique, dans l'ordre :
 
-3. **Vérifier puis appliquer le plan**
+1. le jeu de règles commun AWS ;
+2. le jeu des entrées malveillantes connues ;
+3. le jeu de règles contre les injections SQL ;
+4. la liste de réputation d'adresses IP d'Amazon ;
+5. une règle de limitation qui bloque une IP au-delà de 2 000 requêtes sur 5 minutes (valeur par défaut, modifiable par variable).
 
-   ```bash
-   terraform plan -out tfplan
-   terraform apply tfplan
-   ```
+Les journaux du WAF vont dans CloudWatch Logs avec une rétention de 90 jours, et une alarme se déclenche si plus de 100 requêtes sont bloquées sur 5 minutes.
 
-4. **Récupérer l'URL de l'application**
+### Données et secrets
 
-   ```bash
-   terraform output web_alb_dns_name
-   ```
+- La base RDS n'est pas accessible publiquement, son stockage est chiffré et elle n'accepte que le groupe de sécurité du niveau applicatif.
+- L'identifiant et le mot de passe de la base sont des variables marquées sensibles ; le mot de passe n'a pas de valeur par défaut et doit faire au moins 8 caractères. Il est fourni au moment du déploiement, jamais écrit dans le code.
 
-### Destruction
+---
+
+## Fiabilité et performance
+
+Chaque niveau est dupliqué sur deux zones de disponibilité, de sorte que la perte d'une zone laisse l'autre en service.
+
+| Niveau           | Mécanisme de résilience |
+|------------------|-------------------------|
+| Entrée           | L'ALB public est déployé dans les deux sous-réseaux publics |
+| Web              | Un groupe Auto Scaling réparti sur les deux sous-réseaux publics, minimum 2 instances |
+| Applicatif       | Un ALB interne et un groupe Auto Scaling répartis sur les deux sous-réseaux applicatifs, minimum 2 instances |
+| Sorties Internet | Une NAT Gateway par zone, avec sa propre table de routage |
+| Données          | RDS Multi-AZ : une instance de secours dans l'autre zone, avec bascule automatique |
+
+- **Sauvegardes** : sauvegardes automatiques conservées 7 jours, et instantané final conservé si la base est supprimée.
+- **Contrôles de santé** : les groupes cibles interrogent `/` sur le niveau web et `/health` sur le niveau applicatif, et l'ALB n'envoie du trafic qu'aux instances saines.
+- **Capacité** : chaque niveau est configuré avec un minimum de 2, un maximum de 4 et une capacité souhaitée de 2 instances. Aucune politique de mise à l'échelle automatique n'est définie : la capacité reste à 2 tant qu'elle n'est pas modifiée.
+- **Remplacement des instances** : les groupes utilisent les contrôles de l'état EC2 ; une instance défaillante est donc remplacée, mais pas une instance qui échouerait seulement au contrôle de santé de l'ALB (voir les pistes d'amélioration).
+- **Taille** : les instances `t3.micro` et la base `db.t3.micro` conviennent à une démonstration ; elles sont à redimensionner par variable pour une charge réelle.
+
+---
+
+## Mise en œuvre
+
+Le code est découpé en huit fichiers, un par domaine fonctionnel, pour faciliter la lecture, la maintenance et les revues.
+
+| Fichier        | Contenu |
+|----------------|---------|
+| `providers.tf` | Terraform 1.5.0 ou plus, fournisseur AWS en version 5.x, région, étiquettes par défaut, zones de disponibilité, AMI Amazon Linux 2023 lue dans SSM |
+| `variables.tf` | Région, nom d'environnement, plages CIDR, paramètres du WAF, tailles et capacités des niveaux, paramètres de la base, avec une validation sur le mot de passe |
+| `network.tf`   | VPC, Internet Gateway, six sous-réseaux, deux NAT Gateways, tables de routage |
+| `security.tf`  | Cinq groupes de sécurité, Web ACL WAFv2, journaux et alarme |
+| `web-tier.tf`  | ALB public, groupe cible, écouteur HTTP, modèle de lancement, groupe Auto Scaling, association du WAF |
+| `app-tier.tf`  | ALB interne, groupe cible, écouteur sur le port 8080, modèle de lancement, groupe Auto Scaling |
+| `database.tf`  | Groupe de sous-réseaux et instance RDS MySQL |
+| `outputs.tf`   | Identifiants du VPC et des sous-réseaux, des NAT Gateways, ARN de la Web ACL, noms DNS des deux ALB, point d'accès et port de la base |
+
+Toutes les valeurs variables sont des variables Terraform avec une valeur par défaut, sauf le mot de passe de la base. Un même code peut donc servir pour dev, staging et production en changeant `environment_name` et les tailles. Chaque ressource est nommée et étiquetée à partir de ce préfixe, avec l'étiquette `ManagedBy = terraform`.
+
+### Déploiement
+
+Le déploiement suit le flux Terraform standard, depuis le répertoire qui contient les fichiers `.tf`. Le mot de passe de la base est passé par une variable d'environnement :
 
 ```bash
-terraform destroy
+export TF_VAR_db_password='<mot-de-passe-d-au-moins-8-caracteres>'
+terraform init                # télécharge le fournisseur AWS
+terraform plan -out=tfplan    # affiche le plan sans rien appliquer
+terraform apply tfplan        # applique le plan validé
 ```
 
-Un snapshot final de la base (`<environment_name>-db-final-snapshot`) est créé à la suppression. Pensez à le supprimer manuellement s'il n'est plus utile, et sachez qu'un second `destroy`/`apply` avec le même nom échouera tant que ce snapshot existe.
+Pour supprimer l'environnement après une démonstration, `terraform destroy` retire toutes les ressources ; l'instantané final de la base est conservé.
+
+### Extrait : la base de données
+
+```hcl
+multi_az                = true   # bascule automatique en cas de défaillance
+backup_retention_period = 7      # sauvegardes automatiques sur 7 jours
+storage_encrypted       = true   # chiffrement du stockage
+publicly_accessible     = false  # aucune exposition à Internet
+skip_final_snapshot     = false  # instantané final conservé à la suppression
+```
+
+Le bloc commenté dans `providers.tf` propose un état distant dans S3 avec verrouillage DynamoDB, recommandé dès que plusieurs personnes ou une production sont concernées.
 
 ---
 
-## Variables principales
+## Coûts et optimisation
 
-| Variable                | Défaut        | Description |
-|-------------------------|---------------|-------------|
-| `aws_region`            | `us-east-1`   | Région AWS de déploiement |
-| `environment_name`      | `prod`        | Préfixe de nommage et tag `Environment` |
-| `vpc_cidr`              | `10.0.0.0/16` | Plage CIDR du VPC |
-| `web_instance_type`     | `t3.micro`    | Type d'instance du niveau web |
-| `web_min_size` / `web_max_size` / `web_desired_capacity` | `2` / `4` / `2` | Capacité de l'ASG web |
-| `app_instance_type`     | `t3.micro`    | Type d'instance du niveau applicatif |
-| `app_min_size` / `app_max_size` / `app_desired_capacity` | `2` / `4` / `2` | Capacité de l'ASG applicatif |
-| `db_instance_class`     | `db.t3.micro` | Classe de l'instance RDS |
-| `db_allocated_storage`  | `20`          | Stockage RDS (Go) |
-| `db_username`           | `appadmin`    | Utilisateur maître (sensible) |
-| `db_password`           | —             | Mot de passe maître (**obligatoire**, sensible) |
-| `waf_rate_limit`        | `2000`        | Requêtes max par IP sur 5 minutes avant blocage |
-| `log_retention_in_days` | `90`          | Rétention des logs WAF |
+En fonctionnement permanent, la configuration par défaut coûte environ **186 $ par mois** avant trafic ; les NAT Gateways en représentent plus d'un tiers, et détruire l'environnement hors des périodes d'utilisation est le levier le plus efficace.
 
-La liste complète se trouve dans `variables.tf`.
+### Estimation des coûts
+
+Hypothèses : région `us-east-1`, 730 heures par mois, tarifs à la demande relevés le 12 octobre 2026, configuration par défaut du fichier de variables, sans trafic.
+
+| Poste | Calcul | Production (par défaut) | Test allégé |
+|-------|--------|------------------------:|------------:|
+| NAT Gateways | 0,045 $/h par passerelle | 65,70 $ (2) | 32,85 $ (1) |
+| Load balancers (public et interne) | 0,0225 $/h chacun | 32,85 $ | 32,85 $ |
+| RDS MySQL `db.t3.micro` | 0,017 $/h, doublé en Multi-AZ | 24,82 $ (Multi-AZ) | 12,41 $ (une zone) |
+| Instances EC2 `t3.micro` | 0,0104 $/h par instance | 30,37 $ (4) | 15,18 $ (2) |
+| Adresses IPv4 publiques | 0,005 $/h par adresse | 21,90 $ (6) | 14,60 $ (4) |
+| WAF | 5 $ la Web ACL + environ 1 $ par règle | 10,00 $ | 10,00 $ |
+| **Total mensuel** | | **environ 186 $** | **environ 118 $** |
+
+Les six adresses IPv4 de la colonne Production se répartissent ainsi : deux pour les NAT Gateways, deux pour l'ALB public (une par zone) et deux pour les instances web, qui reçoivent une adresse publique dans les sous-réseaux publics.
+
+Coûts variables non inclus : traitement des données par les NAT Gateways (0,045 $ par Go), capacités des load balancers (LCU), requêtes inspectées par le WAF (0,60 $ par million), stockage disque des instances et de la base, sauvegardes au-delà de l'espace inclus, journaux CloudWatch. Les tarifs proviennent de la page officielle du WAF et de sources tierces qui reprennent les tarifs AWS ; confirmez-les avec l'[AWS Pricing Calculator](https://calculator.aws/) avant de publier des montants.
+
+### Suivi des coûts
+
+- Le fournisseur AWS applique déjà les étiquettes `Environment` et `ManagedBy` à toutes les ressources : il suffit de les activer comme étiquettes de répartition des coûts dans la facturation pour suivre ce projet dans Cost Explorer.
+- Un budget AWS Budgets avec alerte à 80 % et 100 % protège contre un oubli, ce qui compte ici car les coûts fixes courent même sans trafic.
+
+### Solutions de réduction, avec leur compromis
+
+| Levier | Effet | Compromis |
+|--------|-------|-----------|
+| Détruire l'environnement hors démonstration (`terraform destroy`) | Supprime tous les coûts fixes ; l'instantané final de la base reste conservé | Il faut recréer l'environnement avant chaque utilisation |
+| Une seule NAT Gateway en test | Économise environ 33 $ par mois | Plus aucune redondance sur les sorties Internet, et du trafic entre zones |
+| RDS en une seule zone en test | Divise par deux le coût de la base | Pas de bascule automatique |
+| Une instance par niveau en test (`web_min_size`, `app_min_size`) | Économise la moitié du coût EC2 | Aucune redondance dans le niveau |
+| Savings Plans en production | Environ 28 % de moins sur une instance `t3.micro` avec un engagement d'un an | Engagement sur la durée |
+| Retirer la route vers la NAT des sous-réseaux de données | Réduit le trafic traité par la NAT et la surface d'exposition | La base ne peut plus joindre Internet, ce qui n'est pas nécessaire pour RDS |
+| Points de terminaison VPC | Le point de terminaison S3 de type passerelle est gratuit et évite du trafic NAT | Les points de terminaison de type interface sont facturés à l'heure |
+| Instances web en sous-réseaux privés | Supprime deux adresses IPv4 publiques et réduit l'exposition | Leur sortie passe par la NAT |
+| Rétention des journaux WAF à 30 jours (`log_retention_in_days`) | Réduit le stockage CloudWatch | Historique plus court |
+
+### Compromis coût et résilience
+
+Le projet choisit de payer la haute disponibilité : deux NAT Gateways, une base Multi-AZ et deux instances par niveau représentent environ 68 $ par mois de plus que le profil de test. Ce choix se défend en production, mais pas pour un environnement de démonstration, d'où l'intérêt d'externaliser ces paramètres en variables.
 
 ---
 
-## Sécurité et résilience
+## Résultats
 
-- **Multi-AZ à tous les niveaux** : sous-réseaux, ALB, ASG, NAT Gateways (une par AZ, sans dépendance croisée) et RDS Multi-AZ.
-- **WAFv2** sur l'ALB public avec les règles managées AWS :
-  `CommonRuleSet`, `KnownBadInputsRuleSet`, `SQLiRuleSet`, `AmazonIpReputationList`, plus une limite de débit par IP.
-- **Journalisation WAF** dans CloudWatch Logs (`aws-waf-logs-<environment_name>`) et **alarme** si plus de 100 requêtes sont bloquées en 5 minutes.
-- **Base de données** non accessible publiquement, stockage chiffré, sauvegardes automatiques conservées 7 jours, snapshot final à la suppression.
-- **Secrets** : le mot de passe RDS est une variable `sensitive`. Les fichiers d'état (`*.tfstate`) et de variables (`*.tfvars`) sont exclus de Git car ils contiennent ces valeurs en clair.
+Le code et l'état Terraform confirment un déploiement complet de l'architecture : 46 ressources gérées, réparties sur deux zones, avec les paramètres de résilience attendus.
+
+| Point vérifié | Constat | Source |
+|---------------|---------|--------|
+| Ressources déployées | 46 ressources gérées et 3 sources de données | Sauvegarde de l'état Terraform |
+| Répartition par niveau | Deux sous-réseaux par niveau, un dans chaque zone | `network.tf` |
+| Base de données | MySQL 8.0, Multi-AZ, stockage chiffré, sauvegardes sur 7 jours, non publique | État Terraform et `database.tf` |
+| Capacité des niveaux | Web et applicatif : 2 à 4 instances, 2 souhaitées | État Terraform (groupes Auto Scaling) |
+| Exposition à Internet | Un seul point d'entrée : l'ALB public, derrière le WAF | `security.tf` et `web-tier.tf` |
+| Sorties produites | 10 sorties : VPC, sous-réseaux, NAT Gateways, Web ACL, noms DNS des ALB, point d'accès de la base | `outputs.tf` |
+| Fin de vie | L'état courant ne contient plus aucune ressource : l'environnement a été détruit après les essais | `terraform.tfstate` |
+
+Ces constats portent sur la configuration et l'état Terraform. Les fichiers fournis ne contiennent aucune mesure de performance, de charge ou de bascule : ajoutez-en (test de charge, exercice de bascule Multi-AZ) pour étayer les objectifs de disponibilité.
 
 ---
 
-## State distant (recommandé)
+## Enseignements et évolutions
 
-Par défaut, l'état est stocké localement. Pour un usage en équipe ou en production, décommentez et adaptez le bloc `backend "s3"` dans `providers.tf` (bucket S3 chiffré + table DynamoDB pour le verrouillage), puis relancez `terraform init -migrate-state`.
+Le projet atteint son objectif de base, mais la lecture du code laisse huit points à durcir avant une utilisation en production.
 
----
+### Enseignements
 
-## Limites connues / pistes d'amélioration
+- Décrire l'infrastructure en code la rend reproductible, traçable par le contrôle de version et réplicable sur d'autres environnements (dev, staging) ou d'autres régions pour la reprise après sinistre.
+- Externaliser les paramètres en variables permet d'adapter le même code à plusieurs environnements, et de réduire fortement le coût d'un environnement de test.
+- Chaîner les groupes de sécurité plutôt que filtrer par plages d'adresses rend les règles lisibles et robustes.
+- Planifier un exercice périodique de bascule Multi-AZ et un test de charge du WAF entretient la confiance dans la résilience de la plateforme.
 
-- **Pas de HTTPS effectif** : le port 443 est ouvert sur le Security Group de l'ALB public, mais aucun listener HTTPS ni certificat ACM n'est configuré. Ajouter un certificat ACM, un listener 443 et une redirection 80 → 443.
-- **Niveau applicatif factice** : le `user_data` des instances app n'écrit qu'un fichier de log ; aucun service n'écoute sur le port 8080. Le health check `/health` de l'ALB interne échouera tant qu'une application réelle n'est pas déployée.
-- **Instances web en sous-réseau public** avec IP publique (`map_public_ip_on_launch = true`). Elles ne sont joignables que depuis l'ALB grâce au Security Group, mais les placer dans des sous-réseaux privés renforcerait l'isolation.
-- **Pas d'Auto Scaling policies** : les ASG ont une capacité fixe (desired) sans règles de mise à l'échelle sur métriques.
-- **Alarme WAF sans action** : l'alarme CloudWatch n'est reliée à aucun topic SNS de notification.
-- **Version RDS figée** (`engine_version` exacte) afin d'éviter toute modification de l'instance existante ; à faire évoluer volontairement lors des montées de version.
+### Limites constatées et pistes d'amélioration
 
-Il est recommandé de planifier un exercice périodique de bascule Multi-AZ et de test de charge WAF afin de maintenir la confiance dans la résilience de la plateforme dans le temps.
+| Limite constatée dans le code | Piste d'amélioration |
+|-------------------------------|----------------------|
+| L'état local `terraform.tfstate` contient le mot de passe de la base en clair | Il est désormais exclu du dépôt par le `.gitignore` ; activer l'état distant chiffré du bloc commenté de `providers.tf`, et laisser RDS gérer le mot de passe dans Secrets Manager |
+| L'ALB public n'a qu'un écouteur HTTP, alors que le groupe de sécurité ouvre déjà le port 443 | Ajouter un écouteur HTTPS avec un certificat ACM et rediriger le port 80 vers 443 |
+| Le modèle de lancement du niveau applicatif écrit seulement un fichier de journal : rien n'écoute sur le port 8080 ni sur `/health` | Déployer l'application (image, script de démarrage ou conteneur) pour que les contrôles de santé réussissent |
+| Les groupes Auto Scaling utilisent le contrôle EC2 et n'ont aucune politique de mise à l'échelle | Passer le contrôle de santé en mode ELB et ajouter une politique de suivi de cible (CPU ou requêtes par cible) |
+| Les sous-réseaux de données sont routés vers la NAT Gateway, alors que le code les décrit comme isolés | Leur donner une table de routage sans route par défaut |
+| Tous les groupes de sécurité laissent sortir tout le trafic | Restreindre le trafic sortant aux destinations nécessaires |
+| Les instances web ont une adresse publique et aucun moyen d'administration (ni clé SSH, ni profil d'instance) | Les placer en sous-réseaux privés et leur associer un profil d'instance pour Systems Manager Session Manager |
+| L'instantané final de la base porte un nom fixe : une seconde suppression échouera si cet instantané existe déjà | Utiliser un identifiant horodaté |
+
+### Évolutions
+
+- Automatiser `terraform plan` et `terraform apply` dans un pipeline CI/CD, avec revue des changements avant application.
+- Séparer les environnements avec des fichiers de variables ou des espaces de travail Terraform.
+- Ajouter un nom de domaine (Route 53) et du HTTPS de bout en bout.
