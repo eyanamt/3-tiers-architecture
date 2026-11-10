@@ -1,7 +1,5 @@
 # Déploiement d'une architecture AWS 3-tiers avec Terraform
 
-*James Kyle · 12 octobre 2026*
-
 Infrastructure AWS à trois niveaux (web, applicatif, données) répartie sur deux zones de disponibilité et entièrement décrite avec Terraform.
 
 ## Sommaire
