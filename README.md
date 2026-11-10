@@ -228,17 +228,16 @@ Le projet choisit de payer la haute disponibilité : deux NAT Gateways, une base
 
 ## Résultats
 
-Le code et l'état Terraform confirment un déploiement complet de l'architecture : 46 ressources gérées, réparties sur deux zones, avec les paramètres de résilience attendus.
+Le code et l'état Terraform décrivent une architecture complète : 46 ressources gérées, réparties sur deux zones, avec les paramètres de résilience attendus.
 
 | Point vérifié | Constat | Source |
 |---------------|---------|--------|
-| Ressources déployées | 46 ressources gérées et 3 sources de données | Sauvegarde de l'état Terraform |
+| Ressources gérées | 46 ressources gérées et 3 sources de données | État Terraform |
 | Répartition par niveau | Deux sous-réseaux par niveau, un dans chaque zone | `network.tf` |
 | Base de données | MySQL 8.0, Multi-AZ, stockage chiffré, sauvegardes sur 7 jours, non publique | État Terraform et `database.tf` |
 | Capacité des niveaux | Web et applicatif : 2 à 4 instances, 2 souhaitées | État Terraform (groupes Auto Scaling) |
 | Exposition à Internet | Un seul point d'entrée : l'ALB public, derrière le WAF | `security.tf` et `web-tier.tf` |
 | Sorties produites | 10 sorties : VPC, sous-réseaux, NAT Gateways, Web ACL, noms DNS des ALB, point d'accès de la base | `outputs.tf` |
-| Fin de vie | L'état courant ne contient plus aucune ressource : l'environnement a été détruit après les essais | `terraform.tfstate` |
 
 Ces constats portent sur la configuration et l'état Terraform. Les fichiers fournis ne contiennent aucune mesure de performance, de charge ou de bascule : ajoutez-en (test de charge, exercice de bascule Multi-AZ) pour étayer les objectifs de disponibilité.
 
