@@ -34,7 +34,7 @@ Objectifs, vérifiables dans le code :
 
 Le trafic traverse trois niveaux dupliqués sur deux zones de disponibilité, et seul l'ALB public est exposé à Internet.
 
-![Architecture 3-tiers AWS avec WAF : 2 zones de disponibilité, 6 sous-réseaux](Architecture_projet_waf.jpg)
+![Architecture 3-tiers AWS avec WAF : 2 zones de disponibilité, 6 sous-réseaux](3-tiers-architecture.jpg)
 
 Le chemin d'une requête : Internet Gateway, ALB public (protégé par le WAF), instances web, ALB interne, instances applicatives, puis base de données. La région par défaut est `us-east-1`.
 
